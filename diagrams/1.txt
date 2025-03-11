@@ -1,0 +1,32 @@
+@startuml
+title Case 1: Successful TCP Transfer
+
+participant Sender
+participant Receiver
+
+box "CLOSED" over Sender
+
+Sender -> Receiver: **SYN** (seqNo: 6, ackNo: 239141, ISN: 6)
+Sender -> Receiver: **SYN (resent)** (seqNo: 6, ackNo: 239141, ISN: 6)
+
+box "SYN_SENT" over Sender
+
+Receiver -> Sender: **SYN, ACK** (seqNo: 52, ackNo: 7, ISN: 52)
+Sender -> Receiver: **ACK** (seqNo: 7, ackNo: 53)
+
+box "ESTABLISHED" over Sender
+
+Sender -> Receiver: **DATA** (seqNo: 7, ackNo: 53, size: 5 bytes)
+Receiver -> Sender: **ACK** (seqNo: 53, ackNo: 12)
+
+note left of Sender: close()
+box "CLOSING" over Sender
+
+Sender -> Receiver: **FIN** (seqNo: 12, ackNo: 53)
+
+box "FIN_WAIT" over Sender
+
+Receiver -> Sender: **ACK** (seqNo: 53, ackNo: 13)
+
+box "CLOSED" over Sender
+@enduml
