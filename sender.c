@@ -29,10 +29,13 @@
 #define STCP_ERROR -1
 
 typedef struct {
-    int DELETE_ME; /* used only to make this compile */
-
     /* YOUR CODE HERE */
-
+    unsigned short windowSize;  // window size
+    unsigned int nextSeqNo;
+    unsigned int maxSeqNo;  // ensure all seqNo packets sent are <= maxSeqNo
+    unsigned int lastAckNo;
+    struct packet *packetsAwaitingAck;
+    int state;
 } stcp_send_ctrl_blk;
 /* ADD ANY EXTRA FUNCTIONS HERE */
 
@@ -80,6 +83,7 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
     int fd = udp_open(destination, receiversPort, sendersPort);
     (void)fd;
     /* YOUR CODE HERE */
+    udp_open(destination, receiversPort, sendersPort);
     return NULL;
 }
 
@@ -123,6 +127,7 @@ int main(int argc, char **argv) {
     /* You might want to change the size of this buffer to test how your
      * code deals with different packet sizes.
      */
+    // TODO
     unsigned char buffer[STCP_MSS];
     int num_read_bytes;
 

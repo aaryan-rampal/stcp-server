@@ -1,0 +1,25 @@
+title Case 6) 
+//A transfer that has no lost packets and completes;
+
+#box over Sender: CLOSED
+
+
+#Sender->(2)Receiver: **(SYN)** seqNo: 6, ackNo: 239141, ISN: 6
+#box over Sender: SYN_SENT
+
+#Receiver->(2)Sender:**(SYN, ACK)** seqNo: 52, ackNo: 7, ISN: 52
+#Sender->(2)Receiver: **(ACK)** seqNo: 7, ackNo: 53
+box over Sender: ESTABLISHED
+
+Sender->(2)Receiver: seqNo: 7, ackNo: 53, (size: 5 bytes)
+Receiver->(2)Sender: **(ACK)** seqNo: 53, ackNo: 12
+
+Sender->(2)Receiver: seqNo: 12, ackNo: 53, (size: 4 bytes)
+activate Sender
+Receiver-x(2)Sender: **(ACK)** seqNo 53, ackNo 16
+
+Sender->(2)Receiver:seqNo 16, ackNo 53, (size: 4 bytes)
+Receiver->(2)Sender: **(ACK)** seqNo: 53, ackNo: 20, resent 1
+deactivateafter Sender
+
+
