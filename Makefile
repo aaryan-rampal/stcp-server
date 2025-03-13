@@ -9,12 +9,13 @@
 
 CC     = gcc
 CFLAGS = -g -Wall
+CFLAGS_SENDER = -g -Wall -Wextra -Wconversion -Wno-sign-conversion -Wdouble-promotion -Wno-unused-parameter -Wno-unused-function
 
 all:	testwraparound testtcp sender waitForPorts 
 	bash ./runnoerrors.sh
 
 sender: sender.o stcp.o wraparound.o tcp.o log.o
-	$(CC) -o $@ $(CFLAGS) $^
+	$(CC) -o $@ $(CFLAGS_SENDER) $^
 
 wraparound.o: stcp.h wraparound.c
 	$(CC) -c -o  $@  $(CFLAGS) wraparound.c

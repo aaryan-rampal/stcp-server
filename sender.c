@@ -40,6 +40,17 @@ typedef struct {
     int state;
 } stcp_send_ctrl_blk;
 /* ADD ANY EXTRA FUNCTIONS HERE */
+void logPacket(packet *pkt, char *packetType, int convert) {
+    if (convert) ntohHdr(pkt->hdr);
+    logLog("init", "%s %s payload %d bytes", packetType,
+           tcpHdrToString(pkt->hdr), payloadSize(pkt));
+    if (convert) htonHdr(pkt->hdr);
+}
+
+void setIpChecksum(packet *pkt) {
+    pkt->hdr->checksum = 0;
+    pkt->hdr->checksum = ipchecksum((void *)pkt, pkt->len);
+}
 
 /*
  * Send STCP. This routine is to send all the data (len bytes).  If more
@@ -101,10 +112,8 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
     logLog("init", "No errors in malloc cb");
 
     // setting initial values
-    cb->lastAckNo = 0;
-    // TODO: seqNo defined in tcp.h is unsigned int, which I think means
-    // uint32_t but not sure
-    cb->isn = rand() % (UINT32_MAX + 1);
+    cb->lastAckNo = rand() % (UINT32_MAX - 1);
+    cb->isn = rand() % (UINT32_MAX - 1);
     cb->nextSeqNo = cb->isn;
     cb->windowSize = STCP_MAXWIN;
     cb->state = STCP_SENDER_SYN_SENT;
@@ -115,29 +124,61 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
     createSegment(&synPacket, SYN, cb->windowSize, cb->nextSeqNo, cb->lastAckNo,
                   NULL, 0);
     setSyn(synPacket.hdr);
-    ntohHdr(synPacket.hdr);
-    synPacket.hdr->checksum = ipchecksum((void *)&synPacket, synPacket.len);
+    htonHdr(synPacket.hdr);
+    setIpChecksum(&synPacket);
 
     // sending SYN packet
     // TODO: GPT said third param is 0, but third param should be flags, so
     // shouldn't it be SYN?
     send(fd, &synPacket, synPacket.len, 0);
-    logLog("init", "s %s payload %d bytes", tcpHdrToString(synPacket.hdr),
-           payloadSize(&synPacket));
+    logPacket(&synPacket, "s", 1);
 
     // waiting for SYN-ACK
     packet synAckPacket;
-    int res = readWithTimeout(fd, &synAckPacket, STCP_INITIAL_TIMEOUT);
+    initPacket(&synAckPacket, synAckPacket.data, sizeof(tcpheader));
+    logPacket(&synAckPacket, "r", 1);
+    synAckPacket.hdr->checksum = 0;
+    int res = readWithTimeout(fd, (unsigned char *)&synAckPacket,
+                              STCP_INITIAL_TIMEOUT);
+    logPacket(&synAckPacket, "r", 1);
+
+    switch (res) {
+        case STCP_READ_PERMANENT_FAILURE:
+            logPerror("permanennt failure with socket");
+            free(cb);
+            return NULL;
+            break;
+        case STCP_READ_TIMED_OUT:
+            logLog("init", "Timed out waiting for SYN-ACK");
+            free(cb);
+            return NULL;
+            break;
+        default:
+            break;
+    }
+
+    // check checksum to see if they match
+    unsigned short computedChecksum =
+        ipchecksum((void *)&synAckPacket, synAckPacket.len);
+    if (computedChecksum != synAckPacket.hdr->checksum) {
+        logPerror("synAckPacket checksum error");
+        logLog("init",
+               "Computed checksum is %04x, but received checksum is %04x",
+               computedChecksum, synAckPacket.hdr->checksum);
+        free(cb);
+        return NULL;
+    }
+
     ntohHdr(synAckPacket.hdr);
-    logLog("init", "r %s payload %d bytes", tcpHdrToString(synAckPacket.hdr), payloadSize(&synAckPacket));
-    // either response timed out or response was not SYN-ACK
-    if (res < 0 || !(getSyn(synAckPacket.hdr) && getAck(synAckPacket.hdr))) {
-        logPerror("readWithTimeout");
+    // response was not SYN-ACK
+    if (!(getSyn(synAckPacket.hdr) && getAck(synAckPacket.hdr))) {
+        logPerror("not SYN-ACK error");
         logLog("init", "SYN and ACK have the values %d and %d",
                getSyn(synAckPacket.hdr), getAck(synAckPacket.hdr));
         free(cb);
         return NULL;
     }
+    logLog("init", "Checksums match");
 
     // TODO: not checking for checksum right now
     // update window size from response
