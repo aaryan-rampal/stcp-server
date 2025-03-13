@@ -31,6 +31,7 @@
 typedef struct {
     /* YOUR CODE HERE */
     unsigned short windowSize;  // window size
+    unsigned int isn;           // initial sequence number
     unsigned int nextSeqNo;
     unsigned int maxSeqNo;  // ensure all seqNo packets sent are <= maxSeqNo
     unsigned int lastAckNo;
@@ -83,8 +84,68 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
     int fd = udp_open(destination, receiversPort, sendersPort);
     (void)fd;
     /* YOUR CODE HERE */
-    udp_open(destination, receiversPort, sendersPort);
-    return NULL;
+    if (fd < 0) {
+        logPerror("udp_open");
+        return NULL;
+    }
+
+    // creating control block
+    stcp_send_ctrl_blk *cb =
+        (stcp_send_ctrl_blk *)malloc(sizeof(stcp_send_ctrl_blk));
+    if (cb == NULL) {
+        logPerror("malloc cb");
+        return NULL;
+    }
+
+    // setting initial values
+    cb->lastAckNo = 0;
+    // TODO: seqNo defined in tcp.h is unsigned int, which I think means
+    // uint32_t but not sure
+    cb->isn = rand() % (UINT32_MAX - 1);
+    cb->nextSeqNo = cb->isn;
+    cb->windowSize = STCP_MAXWIN;
+    cb->state = STCP_SENDER_SYN_SENT;
+
+    // creating and sending SYN packet
+    packet synPacket;
+    initPacket(&synPacket, NULL, sizeof(tcpheader));
+    createSegment(fd, SYN, cb->windowSize, cb->nextSeqNo, 0, NULL, 0);
+    // TODO: GPT said third param is 0, but third param should be flags, so
+    // shouldn't it be SYN?
+    send(fd, &synPacket, synPacket.len, 0);
+
+    // waiting for SYN-ACK
+    packet synAckPacket;
+    int res = readWithTimeout(fd, (unsigned char *)&synAckPacket,
+                              STCP_INITIAL_TIMEOUT);
+    // either response timed out or response was not SYN-ACK
+    if (res < 0 || !(getSyn(synAckPacket.hdr) && getAck(synAckPacket.hdr))) {
+        logPerror("readWithTimeout");
+        free(cb);
+        return NULL;
+    }
+
+    // TODO: not checking for checksum right now
+    // update window size from response
+    cb->windowSize = synAckPacket.hdr->windowSize;
+    // update sequence numbers
+    cb->lastAckNo = synAckPacket.hdr->seqNo;
+    // TODO: deal with this case
+    if (cb->nextSeqNo > synAckPacket.hdr->ackNo) {
+        logLog("init", "Received SYN-ACK with ackNo %d, but nextSeqNo is %d",
+               synAckPacket.hdr->ackNo, cb->nextSeqNo);
+        cb->nextSeqNo = synAckPacket.hdr->ackNo;
+    }
+
+    // send response ACK
+    packet ackPacket;
+    initPacket(&ackPacket, NULL, sizeof(tcpheader));
+    createSegment(&ackPacket, ACK, cb->windowSize, cb->nextSeqNo, cb->lastAckNo,
+                  NULL, 0);
+    send(fd, &ackPacket, ackPacket.len, 0);
+
+    cb->state = STCP_SENDER_ESTABLISHED;
+    return cb;
 }
 
 /*
