@@ -16,6 +16,7 @@
 
 #include <assert.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/file.h>
@@ -109,7 +110,8 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
     // creating and sending SYN packet
     packet synPacket;
     initPacket(&synPacket, NULL, sizeof(tcpheader));
-    createSegment(&synPacket, SYN, cb->windowSize, cb->nextSeqNo, cb->lastAckNo, NULL, synPacket.len);
+    createSegment(&synPacket, SYN, cb->windowSize, cb->nextSeqNo, cb->lastAckNo,
+                  NULL, synPacket.len);
     // TODO: GPT said third param is 0, but third param should be flags, so
     // shouldn't it be SYN?
     send(fd, &synPacket, synPacket.len, 0);
