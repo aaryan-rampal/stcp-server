@@ -89,6 +89,7 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
         logPerror("udp_open");
         return NULL;
     }
+    logLog("init", "No errors in udp_open");
 
     // creating control block
     stcp_send_ctrl_blk *cb =
@@ -97,32 +98,43 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
         logPerror("malloc cb");
         return NULL;
     }
+    logLog("init", "No errors in malloc cb");
 
     // setting initial values
     cb->lastAckNo = 0;
     // TODO: seqNo defined in tcp.h is unsigned int, which I think means
     // uint32_t but not sure
-    cb->isn = rand() % (UINT32_MAX - 1);
+    cb->isn = rand() % (UINT32_MAX + 1);
     cb->nextSeqNo = cb->isn;
     cb->windowSize = STCP_MAXWIN;
     cb->state = STCP_SENDER_SYN_SENT;
 
-    // creating and sending SYN packet
+    // creating SYN packet
     packet synPacket;
-    initPacket(&synPacket, NULL, sizeof(tcpheader));
+    synPacket.len = sizeof(tcpheader);
     createSegment(&synPacket, SYN, cb->windowSize, cb->nextSeqNo, cb->lastAckNo,
-                  NULL, synPacket.len);
+                  NULL, 0);
+    setSyn(synPacket.hdr);
+    ntohHdr(synPacket.hdr);
+    synPacket.hdr->checksum = ipchecksum((void *)&synPacket, synPacket.len);
+
+    // sending SYN packet
     // TODO: GPT said third param is 0, but third param should be flags, so
     // shouldn't it be SYN?
     send(fd, &synPacket, synPacket.len, 0);
+    logLog("init", "s %s payload %d bytes", tcpHdrToString(synPacket.hdr),
+           payloadSize(&synPacket));
 
     // waiting for SYN-ACK
     packet synAckPacket;
-    int res = readWithTimeout(fd, (unsigned char *)&synAckPacket,
-                              STCP_INITIAL_TIMEOUT);
+    int res = readWithTimeout(fd, &synAckPacket, STCP_INITIAL_TIMEOUT);
+    ntohHdr(synAckPacket.hdr);
+    logLog("init", "r %s payload %d bytes", tcpHdrToString(synAckPacket.hdr), payloadSize(&synAckPacket));
     // either response timed out or response was not SYN-ACK
     if (res < 0 || !(getSyn(synAckPacket.hdr) && getAck(synAckPacket.hdr))) {
         logPerror("readWithTimeout");
+        logLog("init", "SYN and ACK have the values %d and %d",
+               getSyn(synAckPacket.hdr), getAck(synAckPacket.hdr));
         free(cb);
         return NULL;
     }
