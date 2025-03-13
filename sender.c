@@ -32,10 +32,10 @@
 typedef struct {
     /* YOUR CODE HERE */
     unsigned short windowSize;  // window size
-    unsigned int isn;           // initial sequence number
-    unsigned int nextSeqNo;
-    unsigned int maxSeqNo;  // ensure all seqNo packets sent are <= maxSeqNo
-    unsigned int lastAckNo;
+    uint32_t isn;               // initial sequence number
+    uint32_t nextSeqNo;
+    uint32_t maxSeqNo;  // ensure all seqNo packets sent are <= maxSeqNo
+    uint32_t lastAckNo;
     struct packet *packetsAwaitingAck;
     int state;
 } stcp_send_ctrl_blk;
