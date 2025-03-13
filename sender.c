@@ -109,7 +109,7 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
     // creating and sending SYN packet
     packet synPacket;
     initPacket(&synPacket, NULL, sizeof(tcpheader));
-    createSegment(fd, SYN, cb->windowSize, cb->nextSeqNo, 0, NULL, 0);
+    createSegment(&synPacket, SYN, cb->windowSize, cb->nextSeqNo, cb->lastAckNo, NULL, synPacket.len);
     // TODO: GPT said third param is 0, but third param should be flags, so
     // shouldn't it be SYN?
     send(fd, &synPacket, synPacket.len, 0);
