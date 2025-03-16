@@ -29,6 +29,8 @@
 #define STCP_SUCCESS 1
 #define STCP_ERROR -1
 
+#define TCP_HEADER_SIZE sizeof(tcpheader)
+
 typedef struct {
     /* YOUR CODE HERE */
     unsigned short windowSize;  // window size
@@ -41,6 +43,8 @@ typedef struct {
 } stcp_send_ctrl_blk;
 
 /* ADD ANY EXTRA FUNCTIONS HERE */
+#define CHECKSUM_FAILED -2
+#define PACKET_TIMEOUT -3
 
 const char SENT = 's';
 
@@ -58,7 +62,7 @@ int receiveAndValidatePacket(int fd, packet *pkt, int timeout) {
             return -1;
         case STCP_READ_TIMED_OUT:
             logLog("init", "Request timed out");
-            return -1;
+            return PACKET_TIMEOUT;
     }
 
     unsigned short oldChecksum = pkt->hdr->checksum;
@@ -69,7 +73,7 @@ int receiveAndValidatePacket(int fd, packet *pkt, int timeout) {
         logLog("init",
                "Computed checksum is %04x, but received checksum is %04x",
                computedChecksum, pkt->hdr->checksum);
-        return -1;
+        return CHECKSUM_FAILED;
     }
 
     logLog("init", "Checksums match");
@@ -145,7 +149,7 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
 
     // creating SYN packet
     packet synPacket;
-    synPacket.len = sizeof(tcpheader);
+    synPacket.len = TCP_HEADER_SIZE;
     createSegment(&synPacket, SYN, cb->windowSize, cb->nextSeqNo, cb->lastAckNo,
                   NULL, 0);
     setSyn(synPacket.hdr);
@@ -160,7 +164,7 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
 
     // waiting for SYN-ACK
     packet synAckPacket;
-    initPacket(&synAckPacket, synAckPacket.data, sizeof(tcpheader));
+    initPacket(&synAckPacket, synAckPacket.data, TCP_HEADER_SIZE);
 
     int res = receiveAndValidatePacket(fd, &synAckPacket, STCP_INITIAL_TIMEOUT);
     if (res < 0) {
@@ -186,7 +190,7 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
 
     // send response ACK
     packet ackPacket;
-    initPacket(&ackPacket, NULL, sizeof(tcpheader));
+    initPacket(&ackPacket, NULL, TCP_HEADER_SIZE);
     createSegment(&ackPacket, ACK, cb->windowSize, cb->nextSeqNo, cb->lastAckNo,
                   NULL, 0);
     htonHdr(ackPacket.hdr);
@@ -198,7 +202,7 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
 
     // waiting for SYN-ACK
     packet lastAckPacket;
-    initPacket(&lastAckPacket, lastAckPacket.data, sizeof(tcpheader));
+    initPacket(&lastAckPacket, lastAckPacket.data, TCP_HEADER_SIZE);
     res = receiveAndValidatePacket(fd, &lastAckPacket, STCP_INITIAL_TIMEOUT);
     if (res < 0) {
         goto cleanup_cb;
