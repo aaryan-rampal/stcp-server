@@ -325,7 +325,7 @@ int stcp_close(stcp_send_ctrl_blk *cb) {
     cb->state = STCP_SENDER_CLOSING;
 
     // Step 1: Ensure all outstanding data has been acknowledged
-    while (cb->lastAckNo < cb->nextSeqNo) {
+    while (cb->lastRecvdAckNo < cb->nextSeqNo) {
         logLog("close", "Waiting for outstanding data to be ACKed...");
         packet tempPacket;
         initPacket(&tempPacket, tempPacket.data, TCP_HEADER_SIZE);
@@ -373,7 +373,7 @@ cleanup_cb:
     free(cb);
 cleanup_socket:
     close(cb->fd);
-    return NULL;
+    return -1;
 }
 /*
  * Return a port number based on the uid of the caller.  This will
