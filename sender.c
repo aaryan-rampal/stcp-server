@@ -41,18 +41,40 @@ typedef struct {
 } stcp_send_ctrl_blk;
 
 /* ADD ANY EXTRA FUNCTIONS HERE */
-// void logPacket(packet *pkt, char *packetType, int convert) {
-//     if (convert) ntohHdr(pkt->hdr);
-//     logLog("init", "%s %s payload %d bytes", packetType,
-//            tcpHdrToString(pkt->hdr), payloadSize(pkt));
-//     if (convert) htonHdr(pkt->hdr);
-// }
 
 const char SENT = 's';
 
 void setIpChecksum(packet *pkt) {
     pkt->hdr->checksum = 0;
     pkt->hdr->checksum = ipchecksum((void *)pkt, pkt->len);
+}
+
+int receiveAndValidatePacket(int fd, packet *pkt, int timeout) {
+    int res = readWithTimeout(fd, (unsigned char *)pkt, timeout);
+
+    switch (res) {
+        case STCP_READ_PERMANENT_FAILURE:
+            logPerror("Permanaent failure with socket");
+            return -1;
+        case STCP_READ_TIMED_OUT:
+            logLog("init", "Request timed out");
+            return -1;
+    }
+
+    unsigned short oldChecksum = pkt->hdr->checksum;
+    pkt->hdr->checksum = 0;
+    unsigned short computedChecksum = ipchecksum((void *)pkt, pkt->len);
+    if (computedChecksum != oldChecksum) {
+        logPerror("Packet checksum error");
+        logLog("init",
+               "Computed checksum is %04x, but received checksum is %04x",
+               computedChecksum, pkt->hdr->checksum);
+        return -1;
+    }
+
+    logLog("init", "Checksums match");
+    ntohHdr(pkt->hdr);
+    return 0;
 }
 
 /*
@@ -110,7 +132,7 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
         (stcp_send_ctrl_blk *)malloc(sizeof(stcp_send_ctrl_blk));
     if (cb == NULL) {
         logPerror("malloc cb");
-        return NULL;
+        goto cleanup_socket;
     }
     logLog("init", "No errors in malloc cb");
 
@@ -139,40 +161,12 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
     // waiting for SYN-ACK
     packet synAckPacket;
     initPacket(&synAckPacket, synAckPacket.data, sizeof(tcpheader));
-    int res = readWithTimeout(fd, (unsigned char *)&synAckPacket,
-                              STCP_INITIAL_TIMEOUT);
 
-    switch (res) {
-        case STCP_READ_PERMANENT_FAILURE:
-            logPerror("permanennt failure with socket");
-            free(cb);
-            return NULL;
-            break;
-        case STCP_READ_TIMED_OUT:
-            logLog("init", "Timed out waiting for SYN-ACK");
-            free(cb);
-            return NULL;
-            break;
-        default:
-            break;
+    int res = receiveAndValidatePacket(fd, &synAckPacket, STCP_INITIAL_TIMEOUT);
+    if (res < 0) {
+        goto cleanup_cb;
     }
 
-    // check checksum to see if they match
-    unsigned short oldChecksum = synAckPacket.hdr->checksum;
-    synAckPacket.hdr->checksum = 0;
-    unsigned short computedChecksum =
-        ipchecksum((void *)&synAckPacket, synAckPacket.len);
-    if (computedChecksum != oldChecksum) {
-        logPerror("synAckPacket checksum error");
-        logLog("init",
-               "Computed checksum is %04x, but received checksum is %04x",
-               computedChecksum, synAckPacket.hdr->checksum);
-        free(cb);
-        return NULL;
-    }
-    logLog("init", "Checksums match");
-
-    ntohHdr(synAckPacket.hdr);
     // response was not SYN-ACK
     if (!(getSyn(synAckPacket.hdr) && getAck(synAckPacket.hdr))) {
         logPerror("not SYN-ACK error");
@@ -205,39 +199,11 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
     // waiting for SYN-ACK
     packet lastAckPacket;
     initPacket(&lastAckPacket, lastAckPacket.data, sizeof(tcpheader));
-    res = readWithTimeout(fd, (unsigned char *)&lastAckPacket,
-                          STCP_INITIAL_TIMEOUT);
-
-    switch (res) {
-        case STCP_READ_PERMANENT_FAILURE:
-            logPerror("permanennt failure with socket");
-            free(cb);
-            return NULL;
-            break;
-        case STCP_READ_TIMED_OUT:
-            logLog("init", "Timed out waiting for SYN-ACK");
-            free(cb);
-            return NULL;
-            break;
-        default:
-            break;
+    res = receiveAndValidatePacket(fd, &lastAckPacket, STCP_INITIAL_TIMEOUT);
+    if (res < 0) {
+        goto cleanup_cb;
     }
 
-    // check checksum to see if they match
-    oldChecksum = lastAckPacket.hdr->checksum;
-    lastAckPacket.hdr->checksum = 0;
-    computedChecksum = ipchecksum((void *)&lastAckPacket, lastAckPacket.len);
-    if (computedChecksum != oldChecksum) {
-        logPerror("lastAckPacket checksum error");
-        logLog("init",
-               "Computed checksum is %04x, but received checksum is %04x",
-               computedChecksum, lastAckPacket.hdr->checksum);
-        free(cb);
-        return NULL;
-    }
-    logLog("init", "Checksums match");
-
-    ntohHdr(lastAckPacket.hdr);
     // response was not SYN-ACK
     if (!(getAck(lastAckPacket.hdr))) {
         logPerror("not ACK error");
@@ -251,8 +217,15 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
     cb->windowSize = lastAckPacket.hdr->windowSize;
     // update sequence numbers
     cb->lastAckNo = lastAckPacket.hdr->seqNo;
+
     logLog("init", "ended syn ack process");
     return cb;
+
+cleanup_cb:
+    free(cb);
+cleanup_socket:
+    close(fd);
+    return NULL;
 }
 
 /*
