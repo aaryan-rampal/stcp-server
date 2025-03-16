@@ -36,8 +36,9 @@ typedef struct {
     unsigned short windowSize;  // window size
     uint32_t isn;               // initial sequence number
     uint32_t nextSeqNo;
-    uint32_t maxSeqNo;  // ensure all seqNo packets sent are <= maxSeqNo
-    uint32_t lastAckNo;
+    uint32_t maxSeqNo;        // ensure all seqNo packets sent are <= maxSeqNo
+    uint32_t lastRecvdSeqNo;  // last received sequence number
+    uint32_t lastRecvdAckNo;  // last received ack number
     struct packet *packetsAwaitingAck;
     int state;
     int fd;
@@ -63,7 +64,7 @@ void setIpChecksum(packet *pkt) {
 void createPacket(stcp_send_ctrl_blk *cb, packet *pkt, int flags,
                   unsigned char *data, int len) {
     pkt->len = TCP_HEADER_SIZE + len;
-    createSegment(pkt, flags, cb->windowSize, cb->nextSeqNo, cb->lastAckNo,
+    createSegment(pkt, flags, cb->windowSize, cb->nextSeqNo, cb->lastRecvdSeqNo,
                   data, len);
 }
 
@@ -115,8 +116,9 @@ int receiveAndValidatePacket(int fd, packet *pkt, int timeout,
 
     // TODO: maybe check if ack is in order
     cb->windowSize = pkt->hdr->windowSize;
-    cb->lastAckNo =
+    cb->lastRecvdSeqNo =
         pkt->hdr->seqNo + (getSyn(pkt->hdr) || getFin(pkt->hdr) ? 1 : 0);
+    cb->lastRecvdAckNo = pkt->hdr->ackNo;
     cb->nextSeqNo = pkt->hdr->ackNo;
 
     return STCP_SUCCESS;
@@ -167,6 +169,7 @@ int stcp_send(stcp_send_ctrl_blk *stcp_CB, unsigned char *data, int length) {
 
         // wait for ACKs
         logLog("init", "Waiting for ACKs");
+        logLog("init", "size of remainingWindow is %d", remainingWindow);
         while (remainingWindow <= 0) {
             packet ackPacket;
             int res = receiveAndValidatePacket(stcp_CB->fd, &ackPacket, 4000,
@@ -179,24 +182,25 @@ int stcp_send(stcp_send_ctrl_blk *stcp_CB, unsigned char *data, int length) {
 
             // update window size and last acknowledged sequence number
             remainingWindow = ackPacket.hdr->windowSize;
-            stcp_CB->lastAckNo = ackPacket.hdr->ackNo;
+            stcp_CB->lastRecvdAckNo = ackPacket.hdr->ackNo;
         }
     }
 
     // all data sent, waiting for final ACK
-    while (stcp_CB->lastAckNo < stcp_CB->nextSeqNo) {
+    while (stcp_CB->lastRecvdAckNo < stcp_CB->nextSeqNo) {
         logLog("init",
                "Waiting for final ACK, lastAckNo = %u, lastSentSeq = %u",
-               stcp_CB->lastAckNo, stcp_CB->nextSeqNo);
+               stcp_CB->lastRecvdAckNo, stcp_CB->nextSeqNo);
 
         packet ackPacket;
         int res = receiveAndValidatePacket(stcp_CB->fd, &ackPacket,
                                            STCP_INITIAL_TIMEOUT, stcp_CB);
+        logLog("init", "Error receiving final ACK, res is %d", res);
         if (res < 0) {
             return STCP_ERROR;
         }
 
-        stcp_CB->lastAckNo = ackPacket.hdr->ackNo;
+        stcp_CB->lastRecvdAckNo = ackPacket.hdr->ackNo;
     }
 
     return STCP_SUCCESS;
@@ -243,7 +247,8 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
 
     // setting initial values
     cb->fd = fd;
-    cb->lastAckNo = rand() % (UINT16_MAX - 1);
+    cb->lastRecvdAckNo = 0;
+    cb->lastRecvdSeqNo = 0;
     cb->isn = rand() % (UINT16_MAX - 1);
     cb->nextSeqNo = cb->isn;
     cb->windowSize = STCP_MAXWIN;
