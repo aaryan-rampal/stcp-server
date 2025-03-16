@@ -40,6 +40,7 @@ typedef struct {
     uint32_t lastAckNo;
     struct packet *packetsAwaitingAck;
     int state;
+    int fd;
 } stcp_send_ctrl_blk;
 
 /* ADD ANY EXTRA FUNCTIONS HERE */
@@ -52,6 +53,25 @@ const char SENT = 's';
 void setIpChecksum(packet *pkt) {
     pkt->hdr->checksum = 0;
     pkt->hdr->checksum = ipchecksum((void *)pkt, pkt->len);
+}
+
+int createAndSendPacket(int fd, stcp_send_ctrl_blk *cb, packet *pkt, int flags,
+                        unsigned char *data, int len) {
+    pkt->len = TCP_HEADER_SIZE + len;
+    createSegment(pkt, flags, cb->windowSize, cb->nextSeqNo, cb->lastAckNo,
+                  data, len);
+    htonHdr(pkt->hdr);
+    unsigned short checksum = ipchecksum((void *)pkt, pkt->len);
+    ntohHdr(pkt->hdr);
+
+    pkt->hdr->checksum = htons(checksum);
+    dump(SENT, pkt, pkt->len);
+    htonHdr(pkt->hdr);
+    setIpChecksum(pkt);
+
+    // TODO: GPT said third param is 0, but third param should be flags, so
+    // shouldn't it be SYN?
+    send(fd, pkt, pkt->len, 0);
 }
 
 int receiveAndValidatePacket(int fd, packet *pkt, int timeout,
@@ -149,26 +169,17 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
     logLog("init", "No errors in malloc cb");
 
     // setting initial values
-    cb->lastAckNo = rand() % (UINT32_MAX - 1);
-    cb->isn = rand() % (UINT32_MAX - 1);
+    cb->fd = fd;
+    cb->lastAckNo = rand() % (UINT16_MAX - 1);
+    cb->isn = rand() % (UINT16_MAX - 1);
     cb->nextSeqNo = cb->isn;
     cb->windowSize = STCP_MAXWIN;
     cb->state = STCP_SENDER_SYN_SENT;
 
     // creating SYN packet
     packet synPacket;
-    synPacket.len = TCP_HEADER_SIZE;
-    createSegment(&synPacket, SYN, cb->windowSize, cb->nextSeqNo, cb->lastAckNo,
-                  NULL, 0);
-    setSyn(synPacket.hdr);
-    dump(SENT, &synPacket, synPacket.len);
-    htonHdr(synPacket.hdr);
-    setIpChecksum(&synPacket);
-
-    // sending SYN packet
-    // TODO: GPT said third param is 0, but third param should be flags, so
-    // shouldn't it be SYN?
-    send(fd, &synPacket, synPacket.len, 0);
+    // TODO: 0 or 1 byte for size
+    createAndSendPacket(fd, cb, &synPacket, SYN, NULL, 0);
 
     // waiting for SYN-ACK
     packet synAckPacket;
@@ -191,17 +202,10 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
 
     // send response ACK
     packet ackPacket;
-    initPacket(&ackPacket, NULL, TCP_HEADER_SIZE);
-    createSegment(&ackPacket, ACK, cb->windowSize, cb->nextSeqNo, cb->lastAckNo,
-                  NULL, 0);
-    dump(SENT, &ackPacket, ackPacket.len);
-    htonHdr(ackPacket.hdr);
-    setIpChecksum(&ackPacket);
-    send(fd, &ackPacket, ackPacket.len, 0);
-
+    createAndSendPacket(fd, cb, &ackPacket, ACK, NULL, 0);
     cb->state = STCP_SENDER_ESTABLISHED;
 
-    // waiting for SYN-ACK
+    // waiting for ACK
     packet lastAckPacket;
     initPacket(&lastAckPacket, lastAckPacket.data, TCP_HEADER_SIZE);
     res =
@@ -210,7 +214,7 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
         goto cleanup_cb;
     }
 
-    // response was not SYN-ACK
+    // response was not ACK
     if (!(getAck(lastAckPacket.hdr))) {
         logPerror("not ACK error");
         logLog("init", "ACK is %d", getAck(lastAckPacket.hdr));
