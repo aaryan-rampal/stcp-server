@@ -72,7 +72,7 @@ void createPacket(stcp_send_ctrl_blk *cb, packet *pkt, int flags,
  * Send a packet over the network using the provided file descriptor.
  * Logs errors if the send operation fails.
  */
-int sendPacket(int fd, packet *pkt) {
+int sendPacket(int fd, packet *pkt, stcp_send_ctrl_blk *cb) {
     dump(SENT, pkt, pkt->len);  // Log packet details
 
     // Convert to network byte order and compute checksum
@@ -84,6 +84,7 @@ int sendPacket(int fd, packet *pkt) {
         logPerror("send");
         return -1;
     }
+    cb->nextSeqNo += payloadSize(pkt);
     return res;
 }
 
@@ -119,7 +120,6 @@ int receiveAndValidatePacket(int fd, packet *pkt, int timeout,
     cb->lastRecvdSeqNo =
         pkt->hdr->seqNo + (getSyn(pkt->hdr) || getFin(pkt->hdr) ? 1 : 0);
     cb->lastRecvdAckNo = pkt->hdr->ackNo;
-    cb->nextSeqNo = pkt->hdr->ackNo;
 
     return STCP_SUCCESS;
 }
@@ -161,16 +161,16 @@ int stcp_send(stcp_send_ctrl_blk *stcp_CB, unsigned char *data, int length) {
             packet pkt;
             createPacket(stcp_CB, &pkt, ACK, left, chunkSize);
             memcpy(pkt.data + TCP_HEADER_SIZE, left, chunkSize);
-            sendPacket(stcp_CB->fd, &pkt);
+            sendPacket(stcp_CB->fd, &pkt, stcp_CB);
 
             left += chunkSize;
             remainingWindow -= chunkSize;
         }
 
         // wait for ACKs
-        logLog("init", "Waiting for ACKs");
         logLog("init", "size of remainingWindow is %d", remainingWindow);
         while (remainingWindow <= 0) {
+            logLog("init", "Window is full, waiting for ACKs");
             packet ackPacket;
             int res = receiveAndValidatePacket(stcp_CB->fd, &ackPacket, 4000,
                                                stcp_CB);
@@ -258,7 +258,7 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
     packet synPacket;
     // TODO: 0 or 1 byte for size
     createPacket(cb, &synPacket, SYN, NULL, 0);
-    sendPacket(fd, &synPacket);
+    sendPacket(fd, &synPacket, cb);
 
     // waiting for SYN-ACK
     packet synAckPacket;
@@ -282,7 +282,7 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
     // send response ACK
     packet ackPacket;
     createPacket(cb, &ackPacket, ACK, NULL, 0);
-    sendPacket(fd, &ackPacket);
+    sendPacket(fd, &ackPacket, cb);
     cb->state = STCP_SENDER_ESTABLISHED;
 
     // waiting for ACK
@@ -329,8 +329,9 @@ int stcp_close(stcp_send_ctrl_blk *cb) {
         logLog("close", "Waiting for outstanding data to be ACKed...");
         packet tempPacket;
         initPacket(&tempPacket, tempPacket.data, TCP_HEADER_SIZE);
-        int res = receiveAndValidatePacket(cb->fd, &tempPacket, STCP_INITIAL_TIMEOUT, cb);
-        
+        int res = receiveAndValidatePacket(cb->fd, &tempPacket,
+                                           STCP_INITIAL_TIMEOUT, cb);
+
         if (res < 0) {
             logPerror("Timeout/error while waiting for outstanding ACKs");
             goto cleanup_cb;
@@ -341,7 +342,7 @@ int stcp_close(stcp_send_ctrl_blk *cb) {
     packet finPacket;
     // TODO: 0 or 1 byte for size
     createPacket(cb, &finPacket, FIN, NULL, 1);
-    sendPacket(cb->fd, &finPacket);
+    sendPacket(cb->fd, &finPacket, cb);
 
     // Step 2: Move to FIN_WAIT state
     cb->state = STCP_SENDER_FIN_WAIT;
