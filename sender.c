@@ -317,8 +317,41 @@ cleanup_socket:
  * Returns STCP_SUCCESS on success or STCP_ERROR on error.
  */
 int stcp_close(stcp_send_ctrl_blk *cb) {
-    /* YOUR CODE HERE */
+
+    // creating FIN packet
+    packet finPacket;
+    // TODO: 0 or 1 byte for size
+    createPacket(cb, &finPacket, FIN, NULL, 1);
+    sendPacket(fd, &finPacket);
+
+    // waiting for ACK
+    packet ackPacket;
+    initPacket(&ackPacket, ackPacket.data, TCP_HEADER_SIZE);
+
+    int res =
+        receiveAndValidatePacket(fd, &ackPacket, STCP_INITIAL_TIMEOUT, cb);
+    if (res < 0) {
+        goto cleanup_cb;
+    }
+
+    // response was not ACK
+    if (getAck(ackPacket.hdr)) {
+        logPerror("not ACK error");
+        logLog("init", "ACK have the values %d", getAck(ackPacket.hdr));
+        goto cleanup_cb;
+    }
+    logLog("init", "packet has ACK flag");
+
+    // close the connection
+    
+
     return STCP_SUCCESS;
+
+cleanup_cb:
+    free(cb);
+cleanup_socket:
+    close(fd);
+    return NULL;
 }
 /*
  * Return a port number based on the uid of the caller.  This will
