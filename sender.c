@@ -357,7 +357,7 @@ int stcp_close(stcp_send_ctrl_blk *cb) {
     }
 
     // response was not ACK
-    if (getAck(ackPacket.hdr)) {
+    if (!getAck(ackPacket.hdr)) {
         logPerror("not ACK error");
         logLog("init", "ACK have the values %d", getAck(ackPacket.hdr));
         goto cleanup_cb;
