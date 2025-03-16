@@ -84,7 +84,7 @@ int sendPacket(int fd, packet *pkt, stcp_send_ctrl_blk *cb) {
         logPerror("send");
         return -1;
     }
-    cb->nextSeqNo += payloadSize(pkt);
+    cb->nextSeqNo += payloadSize(pkt) + getSyn(pkt->hdr) + getFin(pkt->hdr);
     return res;
 }
 
