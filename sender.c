@@ -55,29 +55,35 @@ void setIpChecksum(packet *pkt) {
     pkt->hdr->checksum = ipchecksum((void *)pkt, pkt->len);
 }
 
-int createAndSendPacket(int fd, stcp_send_ctrl_blk *cb, packet *pkt, int flags,
-                        unsigned char *data, int len) {
+/**
+ * Create a packet with the given flags and data.
+ * This function initializes the packet header, sets sequence/ack numbers,
+ * and calculates the checksum.
+ */
+void createPacket(stcp_send_ctrl_blk *cb, packet *pkt, int flags,
+                  unsigned char *data, int len) {
     pkt->len = TCP_HEADER_SIZE + len;
     createSegment(pkt, flags, cb->windowSize, cb->nextSeqNo, cb->lastAckNo,
                   data, len);
+}
 
-    // htonHdr(pkt->hdr);
-    // unsigned short checksum = ipchecksum((void *)pkt, pkt->len);
-    // ntohHdr(pkt->hdr);
-    // pkt->hdr->checksum = htons(checksum);
+/**
+ * Send a packet over the network using the provided file descriptor.
+ * Logs errors if the send operation fails.
+ */
+int sendPacket(int fd, packet *pkt) {
+    dump(SENT, pkt, pkt->len);  // Log packet details
 
-    dump(SENT, pkt, pkt->len);
-
+    // Convert to network byte order and compute checksum
     htonHdr(pkt->hdr);
     setIpChecksum(pkt);
 
-    // TODO: GPT said third param is 0, but third param should be flags, so
-    // shouldn't it be SYN?
     int res = send(fd, pkt, pkt->len, 0);
     if (res < 0) {
         logPerror("send");
         return -1;
     }
+    return res;
 }
 
 int receiveAndValidatePacket(int fd, packet *pkt, int timeout,
@@ -151,7 +157,9 @@ int stcp_send(stcp_send_ctrl_blk *stcp_CB, unsigned char *data, int length) {
             if (chunkSize > remainingWindow) break;
 
             packet pkt;
-            createAndSendPacket(stcp_CB->fd, stcp_CB, &pkt, 0, left, chunkSize);
+            createPacket(stcp_CB, &pkt, 0, left, chunkSize);
+            memcpy(pkt.data + TCP_HEADER_SIZE, left, chunkSize);
+            sendPacket(stcp_CB->fd, &pkt);
 
             left += chunkSize;
             remainingWindow -= chunkSize;
@@ -161,16 +169,34 @@ int stcp_send(stcp_send_ctrl_blk *stcp_CB, unsigned char *data, int length) {
         logLog("init", "Waiting for ACKs");
         while (remainingWindow <= 0) {
             packet ackPacket;
-            int res = receiveAndValidatePacket(stcp_CB->fd, &ackPacket,
-                                               STCP_INITIAL_TIMEOUT, stcp_CB);
+            int res = receiveAndValidatePacket(stcp_CB->fd, &ackPacket, 4000,
+                                               stcp_CB);
+            logLog("init", "Error receiving ACK, res is %d", res);
             if (res < 0) {
                 return -1;
             }
+            logLog("init", "got here?");
 
             // update window size and last acknowledged sequence number
             remainingWindow = ackPacket.hdr->windowSize;
             stcp_CB->lastAckNo = ackPacket.hdr->ackNo;
         }
+    }
+
+    // all data sent, waiting for final ACK
+    while (stcp_CB->lastAckNo < stcp_CB->nextSeqNo) {
+        logLog("init",
+               "Waiting for final ACK, lastAckNo = %u, lastSentSeq = %u",
+               stcp_CB->lastAckNo, stcp_CB->nextSeqNo);
+
+        packet ackPacket;
+        int res = receiveAndValidatePacket(stcp_CB->fd, &ackPacket,
+                                           STCP_INITIAL_TIMEOUT, stcp_CB);
+        if (res < 0) {
+            return STCP_ERROR;
+        }
+
+        stcp_CB->lastAckNo = ackPacket.hdr->ackNo;
     }
 
     return STCP_SUCCESS;
@@ -226,7 +252,8 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
     // creating SYN packet
     packet synPacket;
     // TODO: 0 or 1 byte for size
-    createAndSendPacket(fd, cb, &synPacket, SYN, NULL, 0);
+    createPacket(cb, &synPacket, SYN, NULL, 0);
+    sendPacket(fd, &synPacket);
 
     // waiting for SYN-ACK
     packet synAckPacket;
@@ -249,7 +276,8 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
 
     // send response ACK
     packet ackPacket;
-    createAndSendPacket(fd, cb, &ackPacket, ACK, NULL, 0);
+    createPacket(cb, &ackPacket, ACK, NULL, 0);
+    sendPacket(fd, &ackPacket);
     cb->state = STCP_SENDER_ESTABLISHED;
 
     // waiting for ACK
