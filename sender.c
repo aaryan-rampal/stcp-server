@@ -60,18 +60,24 @@ int createAndSendPacket(int fd, stcp_send_ctrl_blk *cb, packet *pkt, int flags,
     pkt->len = TCP_HEADER_SIZE + len;
     createSegment(pkt, flags, cb->windowSize, cb->nextSeqNo, cb->lastAckNo,
                   data, len);
-    htonHdr(pkt->hdr);
-    unsigned short checksum = ipchecksum((void *)pkt, pkt->len);
-    ntohHdr(pkt->hdr);
 
-    pkt->hdr->checksum = htons(checksum);
+    // htonHdr(pkt->hdr);
+    // unsigned short checksum = ipchecksum((void *)pkt, pkt->len);
+    // ntohHdr(pkt->hdr);
+    // pkt->hdr->checksum = htons(checksum);
+
     dump(SENT, pkt, pkt->len);
+
     htonHdr(pkt->hdr);
     setIpChecksum(pkt);
 
     // TODO: GPT said third param is 0, but third param should be flags, so
     // shouldn't it be SYN?
-    send(fd, pkt, pkt->len, 0);
+    int res = send(fd, pkt, pkt->len, 0);
+    if (res < 0) {
+        logPerror("send");
+        return -1;
+    }
 }
 
 int receiveAndValidatePacket(int fd, packet *pkt, int timeout,
@@ -103,7 +109,8 @@ int receiveAndValidatePacket(int fd, packet *pkt, int timeout,
 
     // TODO: maybe check if ack is in order
     cb->windowSize = pkt->hdr->windowSize;
-    cb->lastAckNo = pkt->hdr->seqNo + 1;
+    cb->lastAckNo =
+        pkt->hdr->seqNo + (getSyn(pkt->hdr) || getFin(pkt->hdr) ? 1 : 0);
     cb->nextSeqNo = pkt->hdr->ackNo;
 
     return STCP_SUCCESS;
