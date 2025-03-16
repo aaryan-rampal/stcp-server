@@ -45,6 +45,7 @@ typedef struct {
 /* ADD ANY EXTRA FUNCTIONS HERE */
 #define CHECKSUM_FAILED -2
 #define PACKET_TIMEOUT -3
+#define SOCKET_FAILURE -4
 
 const char SENT = 's';
 
@@ -59,7 +60,7 @@ int receiveAndValidatePacket(int fd, packet *pkt, int timeout) {
     switch (res) {
         case STCP_READ_PERMANENT_FAILURE:
             logPerror("Permanaent failure with socket");
-            return -1;
+            return SOCKET_FAILURE;
         case STCP_READ_TIMED_OUT:
             logLog("init", "Request timed out");
             return PACKET_TIMEOUT;
@@ -78,7 +79,7 @@ int receiveAndValidatePacket(int fd, packet *pkt, int timeout) {
 
     logLog("init", "Checksums match");
     ntohHdr(pkt->hdr);
-    return 0;
+    return STCP_SUCCESS;
 }
 
 /*
@@ -153,6 +154,7 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
     createSegment(&synPacket, SYN, cb->windowSize, cb->nextSeqNo, cb->lastAckNo,
                   NULL, 0);
     setSyn(synPacket.hdr);
+    dump(SENT, &synPacket, synPacket.len);
     htonHdr(synPacket.hdr);
     setIpChecksum(&synPacket);
 
@@ -160,7 +162,6 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
     // TODO: GPT said third param is 0, but third param should be flags, so
     // shouldn't it be SYN?
     send(fd, &synPacket, synPacket.len, 0);
-    dump(SENT, &synPacket, synPacket.len);
 
     // waiting for SYN-ACK
     packet synAckPacket;
@@ -176,8 +177,7 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
         logPerror("not SYN-ACK error");
         logLog("init", "SYN and ACK have the values %d and %d",
                getSyn(synAckPacket.hdr), getAck(synAckPacket.hdr));
-        free(cb);
-        return NULL;
+        goto cleanup_cb;
     }
     logLog("init", "packet has SYN and ACK flags");
 
@@ -212,8 +212,7 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
     if (!(getAck(lastAckPacket.hdr))) {
         logPerror("not ACK error");
         logLog("init", "ACK is %d", getAck(lastAckPacket.hdr));
-        free(cb);
-        return NULL;
+        goto cleanup_cb;
     }
     logLog("init", "packet has ACK flag");
 
