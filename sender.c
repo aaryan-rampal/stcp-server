@@ -126,6 +126,46 @@ int receiveAndValidatePacket(int fd, packet *pkt, int timeout,
  */
 int stcp_send(stcp_send_ctrl_blk *stcp_CB, unsigned char *data, int length) {
     /* YOUR CODE HERE */
+    if (!stcp_CB || !data || length <= 0) {
+        logPerror("Invalid arguments");
+        return STCP_ERROR;
+    }
+
+    unsigned char *left = data;
+    unsigned char *right = data + length;
+    int remainingWindow = stcp_CB->windowSize;
+
+    // still have data to send
+    while (left < right) {
+        // keep sending until we hit window
+        logLog("init", "Sending data");
+        while (remainingWindow > 0 && left < right) {
+            int chunkSize = min(STCP_MSS, right - left);
+            if (chunkSize > remainingWindow) break;
+
+            packet pkt;
+            createAndSendPacket(stcp_CB->fd, stcp_CB, &pkt, 0, left, chunkSize);
+
+            left += chunkSize;
+            remainingWindow -= chunkSize;
+        }
+
+        // wait for ACKs
+        logLog("init", "Waiting for ACKs");
+        while (remainingWindow <= 0) {
+            packet ackPacket;
+            int res = receiveAndValidatePacket(stcp_CB->fd, &ackPacket,
+                                               STCP_INITIAL_TIMEOUT, stcp_CB);
+            if (res < 0) {
+                return -1;
+            }
+
+            // update window size and last acknowledged sequence number
+            remainingWindow = ackPacket.hdr->windowSize;
+            stcp_CB->lastAckNo = ackPacket.hdr->ackNo;
+        }
+    }
+
     return STCP_SUCCESS;
 }
 
