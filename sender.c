@@ -159,7 +159,7 @@ int stcp_send(stcp_send_ctrl_blk *stcp_CB, unsigned char *data, int length) {
             if (chunkSize > remainingWindow) break;
 
             packet pkt;
-            createPacket(stcp_CB, &pkt, 0, left, chunkSize);
+            createPacket(stcp_CB, &pkt, ACK, left, chunkSize);
             memcpy(pkt.data + TCP_HEADER_SIZE, left, chunkSize);
             sendPacket(stcp_CB->fd, &pkt);
 
