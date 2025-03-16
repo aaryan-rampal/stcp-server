@@ -2,6 +2,7 @@
     "files.associations": {
         "stdlib.h": "c",
         "string.h": "c",
-        "socket.h": "c"
+        "socket.h": "c",
+        "__config": "c"
     }
 }
