@@ -54,7 +54,8 @@ void setIpChecksum(packet *pkt) {
     pkt->hdr->checksum = ipchecksum((void *)pkt, pkt->len);
 }
 
-int receiveAndValidatePacket(int fd, packet *pkt, int timeout) {
+int receiveAndValidatePacket(int fd, packet *pkt, int timeout,
+                             stcp_send_ctrl_blk *cb) {
     int res = readWithTimeout(fd, (unsigned char *)pkt, timeout);
 
     switch (res) {
@@ -79,6 +80,12 @@ int receiveAndValidatePacket(int fd, packet *pkt, int timeout) {
 
     logLog("init", "Checksums match");
     ntohHdr(pkt->hdr);
+
+    // TODO: maybe check if ack is in order
+    cb->windowSize = pkt->hdr->windowSize;
+    cb->lastAckNo = pkt->hdr->seqNo + 1;
+    cb->nextSeqNo = pkt->hdr->ackNo;
+
     return STCP_SUCCESS;
 }
 
@@ -167,7 +174,8 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
     packet synAckPacket;
     initPacket(&synAckPacket, synAckPacket.data, TCP_HEADER_SIZE);
 
-    int res = receiveAndValidatePacket(fd, &synAckPacket, STCP_INITIAL_TIMEOUT);
+    int res =
+        receiveAndValidatePacket(fd, &synAckPacket, STCP_INITIAL_TIMEOUT, cb);
     if (res < 0) {
         goto cleanup_cb;
     }
@@ -181,29 +189,23 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
     }
     logLog("init", "packet has SYN and ACK flags");
 
-    // update window size from response
-    cb->windowSize = synAckPacket.hdr->windowSize;
-    // update sequence numbers
-    cb->lastAckNo = synAckPacket.hdr->seqNo + 1;
-    // TODO: deal with this case
-    cb->nextSeqNo++;
-
     // send response ACK
     packet ackPacket;
     initPacket(&ackPacket, NULL, TCP_HEADER_SIZE);
     createSegment(&ackPacket, ACK, cb->windowSize, cb->nextSeqNo, cb->lastAckNo,
                   NULL, 0);
+    dump(SENT, &ackPacket, ackPacket.len);
     htonHdr(ackPacket.hdr);
     setIpChecksum(&ackPacket);
     send(fd, &ackPacket, ackPacket.len, 0);
-    dump(SENT, &ackPacket, ackPacket.len);
 
     cb->state = STCP_SENDER_ESTABLISHED;
 
     // waiting for SYN-ACK
     packet lastAckPacket;
     initPacket(&lastAckPacket, lastAckPacket.data, TCP_HEADER_SIZE);
-    res = receiveAndValidatePacket(fd, &lastAckPacket, STCP_INITIAL_TIMEOUT);
+    res =
+        receiveAndValidatePacket(fd, &lastAckPacket, STCP_INITIAL_TIMEOUT, cb);
     if (res < 0) {
         goto cleanup_cb;
     }
@@ -215,11 +217,6 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
         goto cleanup_cb;
     }
     logLog("init", "packet has ACK flag");
-
-    // update window size from response
-    cb->windowSize = lastAckPacket.hdr->windowSize;
-    // update sequence numbers
-    cb->lastAckNo = lastAckPacket.hdr->seqNo;
 
     logLog("init", "ended syn ack process");
     return cb;
@@ -309,6 +306,8 @@ int main(int argc, char **argv) {
     cb = stcp_open(destinationHost, sendersPort, receiversPort);
     if (cb == NULL) {
         /* YOUR CODE HERE */
+        logPerror("sctp_open");
+        exit(1);
     }
 
     /* Start to send data in file via STCP to remote receiver. Chop up
