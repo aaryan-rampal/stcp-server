@@ -156,54 +156,108 @@ int retransmitPacket(stcp_send_ctrl_blk *cb, uint32_t seqNo) {
     return -1;
 }
 
-int receiveAndValidatePacket(int fd, packet *pkt, int timeout,
+// int receiveAndValidatePacket(int fd, packet *pkt, int timeout,
+//                              stcp_send_ctrl_blk *cb) {
+//     int res;
+//     int packetReceived = 1;
+//     while (packetReceived) {
+//         res = readWithTimeout(fd, (unsigned char *)pkt, timeout);
+//         logLog("init", "Read result: %d", res);
+
+//         switch (res) {
+//             case STCP_READ_PERMANENT_FAILURE:
+//                 logPerror("Permanaent failure with socket");
+//                 return SOCKET_FAILURE;
+//             case STCP_READ_TIMED_OUT:
+//                 logLog("init", "Request timed out");
+//                 if (cb->outstandingCount > 0) {
+//                     uint32_t oldestSeq = cb->outstanding[0].seqNo;
+//                     retransmitPacket(cb, oldestSeq);
+//                 }
+//                 timeout = min(STCP_MAX_TIMEOUT, timeout * 2);
+//                 continue;
+//             default:
+//                 packetReceived = 0;
+//                 break;
+//         }
+//     }
+
+//     logLog("init", "Packet received");
+//     unsigned short oldChecksum = pkt->hdr->checksum;
+//     pkt->hdr->checksum = 0;
+//     logLog("init", "Packet length: %d", pkt->hdr->checksum);
+//     unsigned short computedChecksum = ipchecksum((void *)pkt, pkt->len);
+//     if (computedChecksum != oldChecksum) {
+//         logPerror("Packet checksum error");
+//         logLog("init",
+//                "Computed checksum is %04x, but received checksum is %04x",
+//                computedChecksum, pkt->hdr->checksum);
+//         return CHECKSUM_FAILED;
+//     }
+
+//     logLog("init", "Checksums match");
+//     ntohHdr(pkt->hdr);
+
+//     // TODO: maybe check if ack is in order
+//     cb->windowSize = pkt->hdr->windowSize;
+//     cb->lastRecvdSeqNo =
+//         pkt->hdr->seqNo + (getSyn(pkt->hdr) || getFin(pkt->hdr) ? 1 : 0);
+//     cb->lastRecvdAckNo = max(cb->lastRecvdAckNo, pkt->hdr->ackNo);
+
+//     return STCP_SUCCESS;
+// }
+int receiveAndValidatePacket(int fd, packet *pkt, int initial_timeout,
                              stcp_send_ctrl_blk *cb) {
     int res;
-    int packetReceived = 1;
-    while (packetReceived) {
-        res = readWithTimeout(fd, (unsigned char *)pkt, timeout);
-        logLog("init", "Read result: %d", res);
+    int timeout = initial_timeout;
 
-        switch (res) {
-            case STCP_READ_PERMANENT_FAILURE:
-                logPerror("Permanaent failure with socket");
-                return SOCKET_FAILURE;
-            case STCP_READ_TIMED_OUT:
-                logLog("init", "Request timed out");
-                if (cb->outstandingCount > 0) {
-                    uint32_t oldestSeq = cb->outstanding[0].seqNo;
-                    retransmitPacket(cb, oldestSeq);
-                }
-                timeout = min(STCP_MAX_TIMEOUT, timeout * 2);
-                continue;
-            default:
-                packetReceived = 0;
-                break;
+    // Get the first ACK (blocking with timeout)
+    while ((res = readWithTimeout(fd, (unsigned char *)pkt, timeout)) ==
+           STCP_READ_TIMED_OUT) {
+        logLog("init", "Request timed out, retransmitting oldest packet");
+        if (cb->outstandingCount > 0) {
+            uint32_t oldestSeq = cb->outstanding[0].seqNo;
+            retransmitPacket(cb, oldestSeq);
         }
+        timeout = min(STCP_MAX_TIMEOUT, timeout * 2);
+    }
+    if (res < 0) {
+        logPerror("Error reading ACK");
+        return res;
     }
 
-    logLog("init", "Packet received");
+    // Process the first ACK
     unsigned short oldChecksum = pkt->hdr->checksum;
     pkt->hdr->checksum = 0;
-    logLog("init", "Packet length: %d", pkt->hdr->checksum);
     unsigned short computedChecksum = ipchecksum((void *)pkt, pkt->len);
     if (computedChecksum != oldChecksum) {
         logPerror("Packet checksum error");
-        logLog("init",
-               "Computed checksum is %04x, but received checksum is %04x",
-               computedChecksum, pkt->hdr->checksum);
         return CHECKSUM_FAILED;
     }
-
-    logLog("init", "Checksums match");
     ntohHdr(pkt->hdr);
 
-    // TODO: maybe check if ack is in order
-    cb->windowSize = pkt->hdr->windowSize;
-    cb->lastRecvdSeqNo =
-        pkt->hdr->seqNo + (getSyn(pkt->hdr) || getFin(pkt->hdr) ? 1 : 0);
-    cb->lastRecvdAckNo = max(cb->lastRecvdAckNo, pkt->hdr->ackNo);
-    removeOutstandingPackets(cb, pkt->hdr->ackNo);
+    // Now, drain any extra ACKs immediately (non-blocking read)
+    uint32_t cumulativeAck = pkt->hdr->ackNo;
+    packet tempAck;
+    while ((res = readWithTimeout(fd, (unsigned char *)&tempAck, 0)) > 0) {
+        // Validate tempAck as well
+        unsigned short oldChecksum = pkt->hdr->checksum;
+        pkt->hdr->checksum = 0;
+        unsigned short computedChecksum = ipchecksum((void *)pkt, pkt->len);
+        if (computedChecksum != oldChecksum) {
+            logPerror("Packet checksum error");
+        } else {
+            ntohHdr(pkt->hdr);
+
+            if (tempAck.hdr->ackNo > cumulativeAck) {
+                cb->windowSize = tempAck.hdr->windowSize;
+                cumulativeAck = tempAck.hdr->ackNo;
+            }
+        }
+    }
+    // Update control block using the cumulative ack value
+    cb->lastRecvdAckNo = max(cb->lastRecvdAckNo, cumulativeAck);
+    removeOutstandingPackets(cb, cumulativeAck);
 
     return STCP_SUCCESS;
 }
@@ -268,10 +322,6 @@ int stcp_send(stcp_send_ctrl_blk *stcp_CB, unsigned char *data, int length) {
                 return -1;
             }
             logLog("init", "got here?");
-
-            // update window size and last acknowledged sequence number
-            stcp_CB->windowSize = ackPacket.hdr->windowSize;
-            stcp_CB->lastRecvdAckNo = ackPacket.hdr->ackNo;
         }
     }
 
@@ -293,10 +343,6 @@ int finishAllAcks(stcp_send_ctrl_blk *stcp_CB) {
         if (res < 0) {
             return STCP_ERROR;
         }
-        logLog("init", "got here?");
-
-        stcp_CB->lastRecvdAckNo = ackPacket.hdr->ackNo;
-        logLog("init", "lastRecvdAckNo = %u", stcp_CB->lastRecvdAckNo);
     }
     logLog("init", "All ACKs received");
     return STCP_SUCCESS;
