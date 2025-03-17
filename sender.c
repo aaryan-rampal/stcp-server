@@ -32,19 +32,34 @@
 #define TCP_HEADER_SIZE sizeof(tcpheader)
 
 typedef struct {
+    uint32_t seqNo;           // Sequence number of the packet
+    packet pkt;               // Copy of the packet sent
+    int retransmissionCount;  // Count of retransmissions
+} OutstandingPacket;
+
+typedef struct {
     /* YOUR CODE HERE */
     unsigned short windowSize;  // window size
     uint32_t isn;               // initial sequence number
+
     uint32_t nextSeqNo;
-    uint32_t maxSeqNo;        // ensure all seqNo packets sent are <= maxSeqNo
+    uint32_t maxSeqNo;  // ensure all seqNo packets sent are <= maxSeqNo
+
+    // TODO: maybe dont need first one
     uint32_t lastRecvdSeqNo;  // last received sequence number
-    uint32_t lastRecvdAckNo;  // last received ack number
-    struct packet *packetsAwaitingAck;
+    uint32_t lastRecvdAckNo;  // last ack number seen
+
+    OutstandingPacket outstanding[STCP_MAXWIN];
+    int outstandingCount;
+
+    int duplicateAckCount;
+
     int state;
     int fd;
 } stcp_send_ctrl_blk;
 
 /* ADD ANY EXTRA FUNCTIONS HERE */
+
 #define CHECKSUM_FAILED -2
 #define PACKET_TIMEOUT -3
 #define SOCKET_FAILURE -4
@@ -54,6 +69,17 @@ const char SENT = 's';
 void setIpChecksum(packet *pkt) {
     pkt->hdr->checksum = 0;
     pkt->hdr->checksum = ipchecksum((void *)pkt, pkt->len);
+}
+
+// Log the current contents of the outstanding packet array.
+void logOutstandingPackets(stcp_send_ctrl_blk *cb) {
+    logLog("init",
+           "Outstanding Packet Array (count: %d):", cb->outstandingCount);
+    for (int i = 0; i < cb->outstandingCount; i++) {
+        logLog("init", "  Index %d: seqNo = %u, retransmissionCount = %d", i,
+               cb->outstanding[i].seqNo,
+               cb->outstanding[i].retransmissionCount);
+    }
 }
 
 /**
@@ -66,6 +92,27 @@ void createPacket(stcp_send_ctrl_blk *cb, packet *pkt, int flags,
     pkt->len = TCP_HEADER_SIZE + len;
     createSegment(pkt, flags, cb->windowSize, cb->nextSeqNo, cb->lastRecvdSeqNo,
                   data, len);
+}
+
+// gets called with network endianness
+void addOutstandingPacket(stcp_send_ctrl_blk *cb, packet *pkt) {
+    cb->outstanding[cb->outstandingCount].seqNo = ntohl(pkt->hdr->seqNo);
+    cb->outstanding[cb->outstandingCount].pkt = *pkt;  // store a copy
+    cb->outstanding[cb->outstandingCount].retransmissionCount = 0;
+    cb->outstandingCount++;
+    logOutstandingPackets(cb);  // log after addition
+}
+
+void removeOutstandingPackets(stcp_send_ctrl_blk *cb, uint32_t ackNo) {
+    int newCount = 0;
+    for (int i = 0; i < cb->outstandingCount; i++) {
+        if (cb->outstanding[i].seqNo >= ackNo) {
+            // Keep this packet.
+            cb->outstanding[newCount++] = cb->outstanding[i];
+        }
+    }
+    cb->outstandingCount = newCount;
+    logOutstandingPackets(cb);  // log after deletion
 }
 
 /**
@@ -85,20 +132,51 @@ int sendPacket(int fd, packet *pkt, stcp_send_ctrl_blk *cb) {
         return -1;
     }
     cb->nextSeqNo += payloadSize(pkt) + getSyn(pkt->hdr) + getFin(pkt->hdr);
+    // calling this function with network endianness
+    addOutstandingPacket(cb, pkt);
     return res;
+}
+
+int retransmitPacket(stcp_send_ctrl_blk *cb, uint32_t seqNo) {
+    for (int i = 0; i < cb->outstandingCount; i++) {
+        if (cb->outstanding[i].seqNo == seqNo) {
+            packet pkt_copy = cb->outstanding[i].pkt;
+            dump(SENT, &pkt_copy, pkt_copy.len);
+            int res = send(cb->fd, &pkt_copy, pkt_copy.len, 0);
+            if (res < 0) {
+                logPerror("Retransmit send");
+                return -1;
+            }
+            cb->outstanding[i].retransmissionCount++;
+            return res;
+        }
+    }
+    return -1;
 }
 
 int receiveAndValidatePacket(int fd, packet *pkt, int timeout,
                              stcp_send_ctrl_blk *cb) {
-    int res = readWithTimeout(fd, (unsigned char *)pkt, timeout);
+    int res;
+    int packetReceived = 1;
+    while (packetReceived) {
+        res = readWithTimeout(fd, (unsigned char *)pkt, timeout);
 
-    switch (res) {
-        case STCP_READ_PERMANENT_FAILURE:
-            logPerror("Permanaent failure with socket");
-            return SOCKET_FAILURE;
-        case STCP_READ_TIMED_OUT:
-            logLog("init", "Request timed out");
-            return PACKET_TIMEOUT;
+        switch (res) {
+            case STCP_READ_PERMANENT_FAILURE:
+                logPerror("Permanaent failure with socket");
+                return SOCKET_FAILURE;
+            case STCP_READ_TIMED_OUT:
+                logLog("init", "Request timed out");
+                if (cb->outstandingCount > 0) {
+                    uint32_t oldestSeq = cb->outstanding[0].seqNo;
+                    retransmitPacket(cb, oldestSeq);
+                }
+                timeout = min(STCP_MAX_TIMEOUT, timeout * 2);
+                continue;
+            default:
+                packetReceived = 0;
+                break;
+        }
     }
 
     unsigned short oldChecksum = pkt->hdr->checksum;
@@ -119,7 +197,8 @@ int receiveAndValidatePacket(int fd, packet *pkt, int timeout,
     cb->windowSize = pkt->hdr->windowSize;
     cb->lastRecvdSeqNo =
         pkt->hdr->seqNo + (getSyn(pkt->hdr) || getFin(pkt->hdr) ? 1 : 0);
-    cb->lastRecvdAckNo = pkt->hdr->ackNo;
+    cb->lastRecvdAckNo = max(cb->lastRecvdAckNo, pkt->hdr->ackNo);
+    removeOutstandingPackets(cb, pkt->hdr->ackNo);
 
     return STCP_SUCCESS;
 }
@@ -172,9 +251,8 @@ int stcp_send(stcp_send_ctrl_blk *stcp_CB, unsigned char *data, int length) {
         while (remainingWindow <= 0) {
             logLog("init", "Window is full, waiting for ACKs");
             packet ackPacket;
-            int res = receiveAndValidatePacket(stcp_CB->fd, &ackPacket, STCP_INITIAL_TIMEOUT,
-                                               stcp_CB);
-            logLog("init", "Error receiving ACK, res is %d", res);
+            int res = receiveAndValidatePacket(stcp_CB->fd, &ackPacket,
+                                               STCP_INITIAL_TIMEOUT, stcp_CB);
             if (res < 0) {
                 return -1;
             }
@@ -195,7 +273,6 @@ int stcp_send(stcp_send_ctrl_blk *stcp_CB, unsigned char *data, int length) {
         packet ackPacket;
         int res = receiveAndValidatePacket(stcp_CB->fd, &ackPacket,
                                            STCP_INITIAL_TIMEOUT, stcp_CB);
-        logLog("init", "Error receiving final ACK, res is %d", res);
         if (res < 0) {
             return STCP_ERROR;
         }
@@ -303,6 +380,7 @@ stcp_send_ctrl_blk *stcp_open(char *destination, int sendersPort,
     logLog("init", "packet has ACK flag");
 
     logLog("init", "ended syn ack process");
+    cb->outstandingCount = 0;
     return cb;
 
 cleanup_cb:
