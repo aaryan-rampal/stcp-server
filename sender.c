@@ -239,15 +239,16 @@ int receiveAndValidatePacket(int fd, packet *pkt, int initial_timeout,
     // Now, drain any extra ACKs immediately (non-blocking read)
     uint32_t cumulativeAck = pkt->hdr->ackNo;
     packet tempAck;
+    initPacket(&tempAck, tempAck.data, TCP_HEADER_SIZE);
     while ((res = readWithTimeout(fd, (unsigned char *)&tempAck, 0)) > 0) {
         // Validate tempAck as well
-        unsigned short oldChecksum = pkt->hdr->checksum;
-        pkt->hdr->checksum = 0;
-        unsigned short computedChecksum = ipchecksum((void *)pkt, pkt->len);
+        unsigned short oldChecksum = tempAck.hdr->checksum;
+        tempAck.hdr->checksum = 0;
+        unsigned short computedChecksum = ipchecksum((void *)&tempAck, tempAck.len);
         if (computedChecksum != oldChecksum) {
             logPerror("Packet checksum error");
         } else {
-            ntohHdr(pkt->hdr);
+            ntohHdr(tempAck.hdr);
 
             if (tempAck.hdr->ackNo > cumulativeAck) {
                 cb->windowSize = tempAck.hdr->windowSize;
