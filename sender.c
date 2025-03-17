@@ -32,7 +32,9 @@
 #define TCP_HEADER_SIZE sizeof(tcpheader)
 
 typedef struct {
-    uint32_t seqNo;           // Sequence number of the packet
+    // seqNo is in host endianness
+    uint32_t seqNo;  // Sequence number of the packet
+    // pkt is in network endianness
     packet pkt;               // Copy of the packet sent
     int retransmissionCount;  // Count of retransmissions
 } OutstandingPacket;
@@ -160,6 +162,7 @@ int receiveAndValidatePacket(int fd, packet *pkt, int timeout,
     int packetReceived = 1;
     while (packetReceived) {
         res = readWithTimeout(fd, (unsigned char *)pkt, timeout);
+        logLog("init", "Read result: %d", res);
 
         switch (res) {
             case STCP_READ_PERMANENT_FAILURE:
@@ -179,8 +182,10 @@ int receiveAndValidatePacket(int fd, packet *pkt, int timeout,
         }
     }
 
+    logLog("init", "Packet received");
     unsigned short oldChecksum = pkt->hdr->checksum;
     pkt->hdr->checksum = 0;
+    logLog("init", "Packet length: %d", pkt->hdr->checksum);
     unsigned short computedChecksum = ipchecksum((void *)pkt, pkt->len);
     if (computedChecksum != oldChecksum) {
         logPerror("Packet checksum error");
@@ -227,15 +232,20 @@ int stcp_send(stcp_send_ctrl_blk *stcp_CB, unsigned char *data, int length) {
 
     unsigned char *left = data;
     unsigned char *right = data + length;
-    int remainingWindow = stcp_CB->windowSize;
 
     // still have data to send
     while (left < right) {
         // keep sending until we hit window
         logLog("init", "Sending data");
-        while (remainingWindow > 0 && left < right) {
+        while (stcp_CB->windowSize > 0 && left < right) {
+            int bytesRemaining = right - left;
             int chunkSize = min(STCP_MSS, right - left);
-            if (chunkSize > remainingWindow) break;
+            logLog("init", "Inner loop: left=%p, right=%p, bytesRemaining=%d",
+                   left, right, bytesRemaining);
+            logLog("init",
+                   "Calculated chunkSize=%d (STCP_MSS=%d), remainingWindow=%d",
+                   chunkSize, STCP_MSS, stcp_CB->windowSize);
+            if (chunkSize > stcp_CB->windowSize) break;
 
             packet pkt;
             createPacket(stcp_CB, &pkt, ACK, left, chunkSize);
@@ -243,12 +253,13 @@ int stcp_send(stcp_send_ctrl_blk *stcp_CB, unsigned char *data, int length) {
             sendPacket(stcp_CB->fd, &pkt, stcp_CB);
 
             left += chunkSize;
-            remainingWindow -= chunkSize;
+            stcp_CB->windowSize -= chunkSize;
+            logLog("init", "After sending: left=%p, remainingWindow=%d", left,
+                   stcp_CB->windowSize);
         }
 
         // wait for ACKs
-        logLog("init", "size of remainingWindow is %d", remainingWindow);
-        while (remainingWindow <= 0) {
+        while (stcp_CB->windowSize <= length) {
             logLog("init", "Window is full, waiting for ACKs");
             packet ackPacket;
             int res = receiveAndValidatePacket(stcp_CB->fd, &ackPacket,
@@ -259,11 +270,15 @@ int stcp_send(stcp_send_ctrl_blk *stcp_CB, unsigned char *data, int length) {
             logLog("init", "got here?");
 
             // update window size and last acknowledged sequence number
-            remainingWindow = ackPacket.hdr->windowSize;
+            stcp_CB->windowSize = ackPacket.hdr->windowSize;
             stcp_CB->lastRecvdAckNo = ackPacket.hdr->ackNo;
         }
     }
 
+    return STCP_SUCCESS;
+}
+
+int finishAllAcks(stcp_send_ctrl_blk *stcp_CB) {
     // all data sent, waiting for final ACK
     while (stcp_CB->lastRecvdAckNo < stcp_CB->nextSeqNo) {
         logLog("init",
@@ -271,15 +286,19 @@ int stcp_send(stcp_send_ctrl_blk *stcp_CB, unsigned char *data, int length) {
                stcp_CB->lastRecvdAckNo, stcp_CB->nextSeqNo);
 
         packet ackPacket;
+        initPacket(&ackPacket, ackPacket.data, TCP_HEADER_SIZE);
         int res = receiveAndValidatePacket(stcp_CB->fd, &ackPacket,
                                            STCP_INITIAL_TIMEOUT, stcp_CB);
+        logLog("init", "res = %d", res);
         if (res < 0) {
             return STCP_ERROR;
         }
+        logLog("init", "got here?");
 
         stcp_CB->lastRecvdAckNo = ackPacket.hdr->ackNo;
+        logLog("init", "lastRecvdAckNo = %u", stcp_CB->lastRecvdAckNo);
     }
-
+    logLog("init", "All ACKs received");
     return STCP_SUCCESS;
 }
 
@@ -531,12 +550,20 @@ int main(int argc, char **argv) {
         num_read_bytes = read(file, buffer, sizeof(buffer));
 
         /* Break when EOF is reached */
-        if (num_read_bytes <= 0) break;
+        printf("num_read_bytes: %d\n", num_read_bytes);
+        if (num_read_bytes <= 0) {
+            finishAllAcks(cb);
+            break;
+        }
 
         if (stcp_send(cb, buffer, num_read_bytes) == STCP_ERROR) {
             /* YOUR CODE HERE */
+            free(cb);
+            close(file);
+            exit(1);
         }
     }
+    printf("broke out\n");
 
     /* Close the connection to remote receiver */
     if (stcp_close(cb) == STCP_ERROR) {
