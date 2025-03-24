@@ -133,7 +133,12 @@ int sendPacket(int fd, packet *pkt, stcp_send_ctrl_blk *cb) {
         logPerror("send");
         return -1;
     }
-    cb->nextSeqNo += payloadSize(pkt) + getSyn(pkt->hdr) + getFin(pkt->hdr);
+
+    // implement wrap around
+    // cb->nextSeqNo += payloadSize(pkt) + getSyn(pkt->hdr) + getFin(pkt->hdr);
+    cb->nextSeqNo = plus32(cb->nextSeqNo, payloadSize(pkt));
+    cb->nextSeqNo = plus32(cb->nextSeqNo, getSyn(pkt->hdr));
+    cb->nextSeqNo = plus32(cb->nextSeqNo, getFin(pkt->hdr));
     // calling this function with network endianness
     addOutstandingPacket(cb, pkt);
     return res;
@@ -244,7 +249,8 @@ int receiveAndValidatePacket(int fd, packet *pkt, int initial_timeout,
         // Validate tempAck as well
         unsigned short oldChecksum = tempAck.hdr->checksum;
         tempAck.hdr->checksum = 0;
-        unsigned short computedChecksum = ipchecksum((void *)&tempAck, tempAck.len);
+        unsigned short computedChecksum =
+            ipchecksum((void *)&tempAck, tempAck.len);
         if (computedChecksum != oldChecksum) {
             logPerror("Packet checksum error");
         } else {
@@ -515,9 +521,9 @@ int stcp_close(stcp_send_ctrl_blk *cb) {
     return STCP_SUCCESS;
 
 cleanup_cb:
-    free(cb);
-cleanup_socket:
     close(cb->fd);
+cleanup_socket:
+    free(cb);
     return -1;
 }
 /*

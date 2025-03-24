@@ -4,5 +4,6 @@
         "string.h": "c",
         "socket.h": "c",
         "__config": "c"
-    }
+    },
+    "editor.defaultFormatter": "ms-vscode.cpptools"
 }
